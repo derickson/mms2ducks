@@ -513,7 +513,7 @@ var mms2ducks = {
 						}
 					}
 					
-					console.log('configCount: '+ configCount);
+					//console.log('configCount: '+ configCount);
 					if(configCount === 1) masterStatus === mms2ducks.masterStatusCodes.ERROR; // turn it red
 					if(configCount === 2 && masterStatus !== mms2ducks.masterStatusCodes.ERROR) masterStatus = mms2ducks.masterStatusCodes.WARNING; // turn it yellow
 					
