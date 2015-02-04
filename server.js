@@ -6,8 +6,10 @@ var async = require('async');
 // separate config file
 var config = require('./configStuff').config;
 
+var lastDataTime = {};
+
 var DucksMMS = {
-	'pingInterval': 30,
+	'pingInterval': 30000,
 	
 	'MMSusername' : config.MMSusername,
 	'MMSpassword' : config.MMSpassword,
@@ -21,10 +23,19 @@ var DucksMMS = {
 	
 	'eventsSlot': 'mongo_mms_events',
 	'hostsSlot': 'mongo_mms_hosts',
+	'statusSlot': 'mongo_mms_status',
+	'textSlot': 'mongo_mms_text',
 	
 	
 	'mmsDashboardName': 'Mongo MMS',
 	'mmsDashboardSlug': 'mongo-mms',
+	
+	'masterStatusCodes': { //https://dev.ducksboard.com/apidoc/slot-kinds/#status
+		'OK': 0,
+		'ERROR': 1,
+		'WARNING': 2,
+		'UNKNOWN': 3
+	},
 	
 	'mmsGet' : function (url, cb) {
 		request.get(
@@ -214,18 +225,7 @@ var DucksMMS = {
 
 	},
 	
-	'metricsOfInterestSet' : {
-		'OPCOUNTERS_CMD': 1,
-		'OPCOUNTERS_QUERY': 1,
-		'OPCOUNTERS_UPDATE': 1,
-		'OPCOUNTERS_DELETE': 1,
-		'OPCOUNTERS_GETMORE': 1,
-		'OPCOUNTERS_INSERT': 1,
-		'DB_STORAGE_TOTAL': 1,
-		'MEMORY_RESIDENT': 1,
-		'EFFECTIVE_LOCK_PERCENTAGE': 1,
-		'BACKGROUND_FLUSH_AVG': 1
-	},
+
 	
 	'pullStatsForPrimary': function( primary ) {
 		var curSecs = new Date().getTime()/1000;
@@ -243,7 +243,8 @@ var DucksMMS = {
 								item.metricName === 'OPCOUNTERS_DELETE' || 
 								item.metricName === 'OPCOUNTERS_GETMORE' || 
 								item.metricName === 'OPCOUNTERS_INSERT' || 
-								item.metricName === 'DB_STORAGE_TOTAL'|| 
+								item.metricName === 'DB_STORAGE_TOTAL'||
+							//	item.metricName === 'DB_DATA_SIZE_TOTAL'||
 								item.metricName === 'MEMORY_RESIDENT'|| 
 								item.metricName === 'EFFECTIVE_LOCK_PERCENTAGE'|| 
 								item.metricName === 'BACKGROUND_FLUSH_AVG');
@@ -253,8 +254,17 @@ var DucksMMS = {
 						async.each(
 							_.filter(metric.dataPoints, function(point){
 								var pointSecs = new Date(point.timestamp).getTime()/1000;
-							    //console.log(pointSecs);
-								return  (curSecs - pointSecs  <= curSecs - lastPointSecs + 120);
+								var key = primary.replicaSetName + '_' + item.metricName;
+								var tooOld = pointSecs < lastDataTime[key] ? lastDataTime[key] : 0;
+								
+								if( !tooOld ){
+									lastDataTime[key] = pointSecs;
+									return true;
+								} else {
+									return false;
+								}
+								
+								//return  (curSecs - pointSecs  <= curSecs - lastPointSecs + 120);
 							}),
 							function(dataPoint,callbackStat) {
 								var pointSecs = new Date(dataPoint.timestamp).getTime()/1000;
@@ -280,7 +290,7 @@ var DucksMMS = {
 				function(err){
 					if(!err){
 						DucksMMS.pushPrimaryMetrics(primaryStats);
-
+						
 					} else {
 						console.error(err)
 					}
@@ -300,15 +310,22 @@ var DucksMMS = {
 				if(! payload[stat] ){
 					payload[stat] = [];
 				} 
+				
+				var val = dataPoint.value;
+				if( dataPoint.metric === 'EFFECTIVE_LOCK_PERCENTAGE' ){
+					val = val.toPrecision(2);
+				}
+				
 				payload[stat].push({
 					'timestamp': dataPoint.timestamp,
-					'value': dataPoint.value
+					'value': val
 				});
 				callback();
 			},
 			function(err){
 				if(!err) {
 					DucksMMS.pushEndpoint( payload, '' );
+					//printSlot( payload, '_' );
 					//console.log(payload);
 				} else {
 					console.error(err);
@@ -379,7 +396,8 @@ var DucksMMS = {
 					}
 				}
 				
-				DucksMMS.pushEndpoint( duckAlert , 'events');
+				DucksMMS.pushEndpoint( duckAlert , DucksMMS.eventsSlot);
+				//printSlot(duckAlert, DucksMMS.eventsSlot);
 
 			},
 			function(err){
@@ -395,8 +413,12 @@ var DucksMMS = {
 	
 	'interpMMSCluster' : function(cluster){
 
+		var masterStatus = DucksMMS.masterStatusCodes.UNKNOWN;
+
 		var board = [];
 		var curSecs = new Date().getTime()/1000;
+		
+		var repSets = {};
 
 		async.each(
 			cluster.results, 
@@ -421,6 +443,8 @@ var DucksMMS = {
 					typeChar = 'A';
 				}
 
+				
+
 				var hostName = typeChar + ' ' + result.hostname + ':' + result.port;
 
 				var shardMembership =  
@@ -429,6 +453,16 @@ var DucksMMS = {
 						typeChar === 'C' ? 'config' : 
 						typeChar === 'S' ? 'mongos' : 'UNKNOWN';
 
+				// tracking existence of primary in each replicaSet for purpose of Master Status tracking
+				if(typeChar === 'D') {
+					if( repSets[shardMembership] ) {
+						if(isPrimary) repSets[shardMembership] = 'primary';
+					} else {
+						if(isPrimary) { repSets[shardMembership] = 'primary'; } else { repSets[shardMembership] = 'exists'; }	
+					}
+					//console.log( 'shard: '+shardMembership+' set to --> '+ repSets[shardMembership]);
+				}
+
 
 				var lastPing = new Date(result.lastPing).getTime()/1000;
 				var lastPingAge = curSecs - lastPing;
@@ -436,7 +470,11 @@ var DucksMMS = {
 					lastPingAge > 300 ? 'red' :
 						lastPingAge > 180 || (result.replicaStateName && result.replicaStateName === 'DOWN' )? 'yellow' :
 						lastPingAge > 0 ? 'green' : 'gray';
-
+				
+				// age of ping or host down is a WARNING level master status problem
+				if( lastPingAge === 'yellow' ) {
+					masterStatus = DucksMMS.masterStatusCodes.WARNING;
+				}
 
 				board.push({
 					'name': hostName, 
@@ -455,7 +493,28 @@ var DucksMMS = {
 				if(!err){
 					var duckPayload = {'value': {'board': board}};
 
+					//interp master status
+					//console.log(pretty(repSets));
+					//console.log(masterStatus);
+					var primaryCount = 0;
+					for(repSet in repSets){
+						if(repSets[repSet] === 'exists'){
+							masterStatus = DucksMMS.masterStatusCodes.ERROR;
+						} else if(repSets[repSet] === 'primary'){
+							primaryCount++;
+						}
+					}
+					masterStatus = (masterStatus === DucksMMS.masterStatusCodes.UNKNOWN && primaryCount > 0) ? DucksMMS.masterStatusCodes.OK : masterStatus;
+					var statusPayload = {
+						'timestamp': curSecs,
+						'value': masterStatus
+					};
+					DucksMMS.pushEndpoint( statusPayload, DucksMMS.statusSlot );
+					//printSlot(statusPayload, DucksMMS.statusSlot);
+					
 					DucksMMS.pushEndpoint( duckPayload , DucksMMS.hostsSlot);
+					//printSlot(duckPayload, DucksMMS.hostsSlot);
+
 
 				} else {
 					console.error(err)
@@ -514,14 +573,21 @@ var DucksMMS = {
 	}
 };
 
-
-function ping() {
-	DucksMMS.pullCluster(config.MMSgroupId, config.MMSclusterId, DucksMMS.interpMMSCluster);
-	//DucksMMS.clearDucksData('events', function() {
-	//	DucksMMS.pullAlerts(config.MMSgroupId, 100, 1, DucksMMS.interpMMSAlerts);
-	//});
-	
+function pretty( payload ){
+	return JSON.stringify(payload, undefined, 2);
 }
+
+function printPayload( payload ) {
+	console.log( pretty( payload ) );
+}
+
+function printSlot( payload, slot ){
+	console.log("POST to slot: "+ slot );
+	console.log( pretty ( payload ) );
+}
+
+
+
 
 
 var eventWidget =
@@ -577,7 +643,49 @@ var hostWidget =
 			'color4': 'rgba(193, 31, 112, 0.65)'
 		}
 	}
-}
+};
+
+var textWidget =
+{
+	"widget": {
+		"sound": false,
+		"width": 1,
+		"kind": "custom_textual_text",
+		"dashboard": DucksMMS.mmsDashboardSlug,
+		"title": "Notes",
+		"column": 3,
+		"row": 1,
+		"height": 1
+	},
+	"slots": {
+		"1": {
+			"label": "615972"
+		}
+	}
+
+};
+
+var statusWidget =
+{
+	"widget": {
+		"sound": false,
+		"width": 1,
+		"kind": "custom_textual_status",
+		"dashboard": DucksMMS.mmsDashboardSlug,
+		"title": "MongoDB Master Status",
+		"column": 2,
+		"row": 1,
+		"height": 1
+	},
+	"slots": {
+		"1": {
+			"color": "rgba(59, 121, 10, 0.65)",
+			"subtitle": "MongoDB Master Status",
+			"label": "615973"
+		}
+	}
+};
+
 
 function genDataBoxesWidget( shardName, row ) {
 	return {
@@ -588,7 +696,7 @@ function genDataBoxesWidget( shardName, row ) {
         'dashboard': DucksMMS.mmsDashboardSlug,
         'title': 'Shard Stats '+ shardName,
         'column': 2,
-        'row': row,
+        'row': row + 1,
         'height': 1
       },
       'slots': genBoxesSlots( shardName )
@@ -629,7 +737,7 @@ function genGraphWidget(shardName, row) {
         'dashboard': DucksMMS.mmsDashboardSlug,
         'title': 'Shard Ops '+ shardName,
         'column': 3,
-        'row': row,
+        'row': row + 1,
         'height': 1
       },
       'slots': getGraphSlots( shardName )
@@ -677,6 +785,16 @@ function getGraphSlots( shardName ) {
       };
 }
 
+function ping() {
+	console.log("ping");
+	
+	DucksMMS.pullCluster(config.MMSgroupId, config.MMSclusterId, DucksMMS.interpMMSCluster);
+	
+	DucksMMS.clearDucksData(DucksMMS.eventsSlot, function() {
+		DucksMMS.pullAlerts(config.MMSgroupId, 100, 1, DucksMMS.interpMMSAlerts);
+	});
+	
+}
 
 function ensureDashboard( masterCallBack ) {
 	
@@ -686,93 +804,114 @@ function ensureDashboard( masterCallBack ) {
 			masterCallBack();
 		} else {
 			console.log('You do not have an MMS board so I will create one.');
-			//DucksMMS.deleteDashboard( function() {
+
 				DucksMMS.createDashboard( function () {
 
 					DucksMMS.createWidget(eventWidget, function() {
 						DucksMMS.createWidget(hostWidget, function(){ 
-							DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function( body ) {
+							DucksMMS.createWidget(textWidget, function() {
+								DucksMMS.createWidget(statusWidget, function(){
+							
+									DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function( body ) {
 
-								alertId = _.find(body.data, function(item){ return item.widget.title === 'MMS Alerts'; } ).widget['id'];
-								hostsId = _.find(body.data, function(item){ return item.widget.title === 'Hosts'; } ).widget['id'];
+										alertId = _.find(body.data, function(item){ return item.widget.title === 'MMS Alerts'; } ).widget['id'];
+										hostsId = _.find(body.data, function(item){ return item.widget.title === 'Hosts'; } ).widget['id'];
+										statusId = _.find(body.data, function(item){ return item.widget.title === statusWidget.widget.title; } ).widget['id'];
+										textId = _.find(body.data, function(item){ return item.widget.title === textWidget.widget.title; } ).widget['id'];
 
-								DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+alertId, {
-									'slots': {
-										'1': {
-											'label': DucksMMS.eventsSlot
-										}
-									}
-								}, function(data){
-
-
-									DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+hostsId, {
-										'slots': {
-											'1': {
-												'label': DucksMMS.hostsSlot
+										DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+alertId, {
+											'slots': {
+												'1': {
+													'label': DucksMMS.eventsSlot
+												}
 											}
-										}
-									}, function(data){
+										}, function(data){
 
-										async.each(
-											DucksMMS.shardNames,
-											function(shardName, callback ){
-												//TODO row order not being respected by Ducks API when call order is unpredictable
-												var index = DucksMMS.shardNames.indexOf(shardName);
-												DucksMMS.createWidget( genGraphWidget(shardName, index + 1), 
-													DucksMMS.createWidget( genDataBoxesWidget( shardName, index + 1 ),
-														callback
-													)
-												);
-											},
-											function(err){
-												console.log("Done async");
-												setTimeout(function() {
-													DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function(body) {
-														//console.log(JSON.stringify(body, undefined, 2))
+
+											DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+hostsId, {
+												'slots': {
+													'1': {
+														'label': DucksMMS.hostsSlot
+													}
+												}
+											}, function(data){
+												
+												DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+statusId, {
+													'slots': {
+														'1': {
+															'label': DucksMMS.statusSlot
+														}
+													}
+												}, function(data){
+													
+													DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+textId, {
+														'slots': {
+															'1': {
+																'label': DucksMMS.textSlot
+															}
+														}
+													}, function(data){
+												
+												
 
 														async.each(
 															DucksMMS.shardNames,
 															function(shardName, callback ){
+																//TODO row order not being respected by Ducks API when call order is unpredictable
 																var index = DucksMMS.shardNames.indexOf(shardName);
-
-																var graphId = _.find(body.data, function(item){ return item.widget.title === 'Shard Ops '+ shardName; } ).widget['id'];
-																var boxId = _.find(body.data, function(item){ return item.widget.title === 'Shard Stats '+ shardName; } ).widget['id'];
-
-																console.log('ShardName: '+shardName+' graphId: '+graphId+' boxId: '+boxId)
-
-																DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+graphId , {'slots': getGraphSlots( shardName ) }, function(){
-																	DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+boxId , {'slots': genBoxesSlots( shardName ) }, function(){
-																		callback();
-																	});
-																});
-
-																//DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+graphId, getGraphSlots( shardName ) , callback);
-
+																DucksMMS.createWidget( genGraphWidget(shardName, index + 1), 
+																	DucksMMS.createWidget( genDataBoxesWidget( shardName, index + 1 ),
+																		callback
+																	)
+																);
 															},
 															function(err){
-																if(masterCallBack) masterCallBack();
+																console.log("Done async");
+																setTimeout(function() {
+																	DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function(body) {
+																		//console.log(JSON.stringify(body, undefined, 2))
+
+																		async.each(
+																			DucksMMS.shardNames,
+																			function(shardName, callback ){
+																				var index = DucksMMS.shardNames.indexOf(shardName);
+
+																				var graphId = _.find(body.data, function(item){ return item.widget.title === 'Shard Ops '+ shardName; } ).widget['id'];
+																				var boxId = _.find(body.data, function(item){ return item.widget.title === 'Shard Stats '+ shardName; } ).widget['id'];
+
+																				console.log('ShardName: '+shardName+' graphId: '+graphId+' boxId: '+boxId)
+
+																				DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+graphId , {'slots': getGraphSlots( shardName ) }, function(){
+																					DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+boxId , {'slots': genBoxesSlots( shardName ) }, function(){
+																						callback();
+																					});
+																				});
+
+																				//DucksMMS.ducksPut( 'https://app.ducksboard.com/api/widgets/'+graphId, getGraphSlots( shardName ) , callback);
+
+																			},
+																			function(err){
+																				if(masterCallBack) masterCallBack();
+																			}
+																		);
+																	})
+																}, 4000);
+
 															}
 														);
-													})
-												}, 4000);
-
-											}
-										);
-
+													});
+												});
+											});
+										});
 
 									})
 								});
-
-							})
+							});
 						});
 					});
 				});
-			//});
-		}
-	});
-	
-	
-	
+		} // end if dashboard doesn't exist
+	});	
 }
 
 
@@ -782,11 +921,16 @@ function ensureDashboard( masterCallBack ) {
 //ping();
 
 //DucksMMS.getDashWidgets('main-dashboard');
-//DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function(body){console.log(body);});
+//DucksMMS.getDashWidgets(DucksMMS.mmsDashboardSlug, function(body){console.log(pretty(body));});
+
 
 ensureDashboard(function(){
 	ping();
-	//setInterval(ping, DucksMMS.pingInterval);
+	setInterval(ping, DucksMMS.pingInterval);
 });
 
+
+//ping();
+
 //DucksMMS.deleteDashboard( function() { console.log("Done"); });
+//DucksMMS.clearDucksData( DucksMMS.hostsSlot, function() { console.log("Done"); });
