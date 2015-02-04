@@ -16,5 +16,5 @@ node server.js
 
 ## TODO
 * Maybe add more state-fulness around alerts etc.  Presently, events timeline completely refreshes each ping.
-* make sure config server status lights are correct
-* Consider config state when computing master status
+* make sure config server status lights are correct (https://jira.mongodb.org/browse/MMSP-4549)
+* Consider config state when computing master status (currently hacked to just be a count of config servers)

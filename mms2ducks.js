@@ -420,6 +420,7 @@ var mms2ducks = {
 		var curSecs = new Date().getTime()/1000;
 		
 		var repSets = {};
+		var configCount = 0;
 
 		async.each(
 			cluster.results, 
@@ -461,6 +462,8 @@ var mms2ducks = {
 						if(isPrimary && !isDown) { repSets[shardMembership] = 'primary'; } else { repSets[shardMembership] = isDown ? 'down' : 'exists'; }	
 					}
 					//console.log( 'shard: '+shardMembership+' set to --> '+ repSets[shardMembership]);
+				} else if(typeChar === 'C') {
+					configCount++;
 				}
 
 
@@ -509,6 +512,11 @@ var mms2ducks = {
 							primaryCount++;
 						}
 					}
+					
+					console.log('configCount: '+ configCount);
+					if(configCount === 1) masterStatus === mms2ducks.masterStatusCodes.ERROR; // turn it red
+					if(configCount === 2 && masterStatus !== mms2ducks.masterStatusCodes.ERROR) masterStatus = mms2ducks.masterStatusCodes.WARNING; // turn it yellow
+					
 					masterStatus = (masterStatus === mms2ducks.masterStatusCodes.UNKNOWN && primaryCount > 0) ? mms2ducks.masterStatusCodes.OK : masterStatus;
 					var statusPayload = {
 						'timestamp': curSecs,
