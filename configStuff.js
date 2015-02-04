@@ -11,7 +11,8 @@ exports.config = {
 	'DucksPassword' : 'xxx',
 	
 	// actual names of shards according to MMS
-	'shardNames': ['s0', 's1', 's2']
+	'shardNames': ['s0', 's1', 's2'],
 	
+	'pingInterval': 30000
 }
 
