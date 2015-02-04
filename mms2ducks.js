@@ -416,6 +416,7 @@ var mms2ducks = {
 		var masterStatus = mms2ducks.masterStatusCodes.UNKNOWN;
 
 		var board = [];
+		//console.log('curTime: '+ new Date());
 		var curSecs = new Date().getTime()/1000;
 		
 		var repSets = {};
@@ -443,8 +444,6 @@ var mms2ducks = {
 					typeChar = 'A';
 				}
 
-				
-
 				var hostName = typeChar + ' ' + result.hostname + ':' + result.port;
 
 				var shardMembership =  
@@ -454,11 +453,12 @@ var mms2ducks = {
 						typeChar === 'S' ? 'mongos' : 'UNKNOWN';
 
 				// tracking existence of primary in each replicaSet for purpose of Master Status tracking
+				var isDown = result.replicaStateName && result.replicaStateName === 'DOWN'
 				if(typeChar === 'D') {
 					if( repSets[shardMembership] ) {
-						if(isPrimary) repSets[shardMembership] = 'primary';
+						if(isPrimary && !isDown) repSets[shardMembership] = 'primary';
 					} else {
-						if(isPrimary) { repSets[shardMembership] = 'primary'; } else { repSets[shardMembership] = 'exists'; }	
+						if(isPrimary && !isDown) { repSets[shardMembership] = 'primary'; } else { repSets[shardMembership] = isDown ? 'down' : 'exists'; }	
 					}
 					//console.log( 'shard: '+shardMembership+' set to --> '+ repSets[shardMembership]);
 				}
@@ -466,13 +466,18 @@ var mms2ducks = {
 
 				var lastPing = new Date(result.lastPing).getTime()/1000;
 				var lastPingAge = curSecs - lastPing;
+				
+				//if(isPrimary) { 
+				//	console.log(shardMembership + ': ' + result.lastPing);
+				//}
+				
 				var lastPingAgeColor = 
-					lastPingAge > 300 ? 'red' :
-						lastPingAge > 180 || (result.replicaStateName && result.replicaStateName === 'DOWN' )? 'yellow' :
+					lastPingAge > (mms2ducks.pinginterval/1000) * 10 ? 'red' :
+						lastPingAge > (mms2ducks.pinginterval/1000) * 6 || (result.replicaStateName && result.replicaStateName === 'DOWN' )? 'yellow' :
 						lastPingAge > 0 ? 'green' : 'gray';
 				
 				// age of ping or host down is a WARNING level master status problem
-				if( lastPingAge === 'yellow' ) {
+				if( lastPingAgeColor === 'yellow' || lastPingAgeColor === 'red' || lastPingAgeColor === 'gray') {
 					masterStatus = mms2ducks.masterStatusCodes.WARNING;
 				}
 
@@ -514,6 +519,15 @@ var mms2ducks = {
 					
 					mms2ducks.pushEndpoint( duckPayload , mms2ducks.hostsSlot);
 					//printSlot(duckPayload, mms2ducks.hostsSlot);
+
+					//text message
+					var txtPayload = {
+						'timestamp': curSecs,
+						'value': {
+							'content': (new Date()).toISOString() + '\nMMS: ' + mms2ducks.MMSurl
+						}
+					};
+					mms2ducks.pushEndpoint( txtPayload , mms2ducks.textSlot);
 
 
 				} else {

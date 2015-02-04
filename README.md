@@ -15,6 +15,6 @@ edit the config file with your account keys etc.
 node server.js
 
 ## TODO
-* Clean Up Code
-* Modularize
-* Add more statefulness around alerts etc.
+* Maybe add more state-fulness around alerts etc.  Presently, events timeline completely refreshes each ping.
+* make sure config server status lights are correct
+* Consider config state when computing master status
