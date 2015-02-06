@@ -30,4 +30,5 @@ node server.js
 * Consider config state when computing master status (currently hacked to just be a count of config servers)
 * parameterize which metrics make it to the two widgets for each shard
 * figure out why the mongos isn't showing up
+* better api hook / callback for something like integration with an alerting manager (SNS) etc.
 
