@@ -506,7 +506,7 @@ var mms2ducks = {
 					//console.log(masterStatus);
 					var primaryCount = 0;
 					for(repSet in repSets){
-						if(repSets[repSet] === 'exists'){
+						if(repSets[repSet] === 'exists' || repSets[repSet] === 'down'){
 							masterStatus = mms2ducks.masterStatusCodes.ERROR;
 						} else if(repSets[repSet] === 'primary'){
 							primaryCount++;
